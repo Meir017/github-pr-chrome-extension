@@ -291,65 +291,60 @@ function injectPRInfo(row: Element, data: EnhancedPRData): void {
   const { pr, reviews, ci, comparison } = data;
   const reviewSummary = summarizeReviews(reviews);
 
-  // ── Row 1: size, diff stats, files, draft ──
-  const row1 = document.createElement("div");
-  row1.className = "ghpr-enhancements";
+  // ── Single row of badges ──
+  const badgeRow = document.createElement("div");
+  badgeRow.className = "ghpr-enhancements";
 
   const size = calculatePRSize(pr.additions, pr.deletions);
-  row1.appendChild(createBadge(size, getSizeColor(size), `PR Size: ${size} (${pr.additions + pr.deletions} lines)`));
-  row1.appendChild(createDiffStats(pr.additions, pr.deletions));
-  row1.appendChild(createBadge(`${pr.changed_files} file${pr.changed_files !== 1 ? "s" : ""}`, "#6f42c1", `${pr.changed_files} files changed`));
+  badgeRow.appendChild(createBadge(size, getSizeColor(size), `PR Size: ${size} (${pr.additions + pr.deletions} lines)`));
+  badgeRow.appendChild(createDiffStats(pr.additions, pr.deletions));
+  badgeRow.appendChild(createBadge(`${pr.changed_files} file${pr.changed_files !== 1 ? "s" : ""}`, "#6f42c1", `${pr.changed_files} files changed`));
 
   if (pr.draft) {
-    row1.appendChild(createBadge("Draft", "#6a737d", "This is a draft PR"));
+    badgeRow.appendChild(createBadge("Draft", "#6a737d", "This is a draft PR"));
   }
-
-  // ── Color the existing "opened X ago" timestamp based on age ──
-  colorExistingTimestamp(row, pr.created_at);
-
-  // ── Row 2: review status, CI, merge conflicts, staleness, reviewer highlight, comments ──
-  const row2 = document.createElement("div");
-  row2.className = "ghpr-enhancements ghpr-status-row";
 
   // Review status
   const reviewInfo = getReviewBadgeInfo(reviewSummary.overall);
   const reviewTitle = buildReviewTitle(reviewSummary);
-  row2.appendChild(createIconBadge(reviewInfo.icon, reviewInfo.text, reviewInfo.color, reviewTitle));
+  badgeRow.appendChild(createIconBadge(reviewInfo.icon, reviewInfo.text, reviewInfo.color, reviewTitle));
 
   // CI status
   const ciInfo = getCIBadgeInfo(ci);
-  row2.appendChild(createIconBadge(ciInfo.icon, ciInfo.text, ciInfo.color, `CI: ${ciInfo.text}`));
+  badgeRow.appendChild(createIconBadge(ciInfo.icon, ciInfo.text, ciInfo.color, `CI: ${ciInfo.text}`));
 
   // Merge conflict
   const mergeInfo = getMergeabilityInfo(pr.mergeable_state);
   if (mergeInfo) {
-    row2.appendChild(createIconBadge(mergeInfo.icon, mergeInfo.text, mergeInfo.color, `Merge status: ${mergeInfo.text}`));
+    badgeRow.appendChild(createIconBadge(mergeInfo.icon, mergeInfo.text, mergeInfo.color, `Merge status: ${mergeInfo.text}`));
   }
 
   // Branch staleness
   const stalenessInfo = getStalenessInfo(comparison);
   if (stalenessInfo) {
-    row2.appendChild(createIconBadge("↓", stalenessInfo.text, stalenessInfo.color, `Branch is ${stalenessInfo.text} ${pr.base_ref}`));
+    badgeRow.appendChild(createIconBadge("↓", stalenessInfo.text, stalenessInfo.color, `Branch is ${stalenessInfo.text} ${pr.base_ref}`));
   }
 
   // Requested reviewer highlight (you)
   if (currentUserLogin && pr.requested_reviewers.includes(currentUserLogin)) {
-    row2.appendChild(createIconBadge("👁", "Review requested", "#0969da", "You have been requested to review this PR"));
+    badgeRow.appendChild(createIconBadge("👁", "Review requested", "#0969da", "You have been requested to review this PR"));
     row.classList.add("ghpr-review-requested");
   }
 
   // Review comments count
   if (pr.review_comments > 0) {
-    row2.appendChild(createIconBadge("💬", `${pr.review_comments}`, "#6e7781", `${pr.review_comments} review comment${pr.review_comments !== 1 ? "s" : ""}`));
+    badgeRow.appendChild(createIconBadge("💬", `${pr.review_comments}`, "#6e7781", `${pr.review_comments} review comment${pr.review_comments !== 1 ? "s" : ""}`));
   }
+
+  // ── Color the existing "opened X ago" timestamp based on age ──
+  colorExistingTimestamp(row, pr.created_at);
 
   // ── Inject into DOM ──
   const titleLink = row.querySelector('a[id^="issue_"]') || row.querySelector('a[href*="/pull/"]');
   if (titleLink) {
     const parentEl = titleLink.closest("div") || titleLink.parentElement;
     if (parentEl) {
-      parentEl.appendChild(row1);
-      parentEl.appendChild(row2);
+      parentEl.appendChild(badgeRow);
     }
   }
 }
