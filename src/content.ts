@@ -283,22 +283,28 @@ function enhanceExistingCIIcon(row: Element, ci: CIStatus): void {
 
   const label = document.createElement("span");
   label.className = "ghpr-ci-text";
+  label.style.cssText = "font-size: 12px; font-weight: 500; margin-left: 4px; vertical-align: middle;";
 
   if (ci.overall === "success") {
-    label.textContent = `${ci.passed}/${ci.total} passed`;
     label.style.color = "#1a7f37";
+    label.textContent = `${ci.passed}/${ci.total} ✓`;
   } else if (ci.overall === "failure") {
-    const parts: string[] = [];
-    if (ci.passed > 0) parts.push(`${ci.passed} passed`);
-    parts.push(`${ci.failed} failed`);
-    label.textContent = parts.join(", ");
-    label.style.color = "#cf222e";
+    // e.g. "2/3 · 1 failed"
+    const passedSpan = document.createElement("span");
+    passedSpan.style.color = "#1a7f37";
+    passedSpan.textContent = `${ci.passed}`;
+    const sep = document.createTextNode(`/${ci.total} · `);
+    const failedSpan = document.createElement("span");
+    failedSpan.style.color = "#cf222e";
+    failedSpan.textContent = `${ci.failed} ✕`;
+    label.appendChild(passedSpan);
+    label.appendChild(sep);
+    label.appendChild(failedSpan);
   } else {
-    label.textContent = `${ci.pending} pending`;
     label.style.color = "#9a6700";
+    label.textContent = `${ci.pending} pending`;
   }
 
-  label.style.cssText += "font-size: 12px; font-weight: 500; margin-left: 4px; vertical-align: middle;";
   summary.appendChild(label);
 }
 
