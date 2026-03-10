@@ -24,6 +24,11 @@ function fetchCurrentUser(): Promise<string | null> {
     chrome.runtime.sendMessage(
       { type: "FETCH_CURRENT_USER" },
       (response: any) => {
+        if (chrome.runtime.lastError) {
+          console.debug("[GHPR] fetchCurrentUser error:", chrome.runtime.lastError.message);
+          resolve(null);
+          return;
+        }
         if (response?.success) {
           currentUserLogin = response.login;
           resolve(response.login);
@@ -68,6 +73,15 @@ function fetchEnhancedPR(
     chrome.runtime.sendMessage(
       { type: "FETCH_PR_ENHANCED", owner, repo, prNumber },
       (response: EnhancedPRResponse | ErrorResponse) => {
+        if (chrome.runtime.lastError) {
+          console.debug("[GHPR] sendMessage error:", chrome.runtime.lastError.message);
+          resolve({ success: false, error: chrome.runtime.lastError.message ?? "Unknown error" });
+          return;
+        }
+        if (!response) {
+          resolve({ success: false, error: "No response from background worker" });
+          return;
+        }
         resolve(response);
       }
     );
@@ -209,8 +223,9 @@ async function enhancePRList(): Promise<void> {
   const repoInfo = parseRepoFromURL();
   if (!repoInfo) return;
 
+  // Only target the row-level divs, not the inner link elements
   const rows = document.querySelectorAll(
-    '[id^="issue_"]:not(.ghpr-processed), .js-issue-row:not(.ghpr-processed)'
+    '.js-issue-row:not(.ghpr-processed)'
   );
   if (rows.length === 0) return;
 
@@ -222,13 +237,21 @@ async function enhancePRList(): Promise<void> {
     const batch = rowArray.slice(i, i + BATCH_SIZE);
     const promises = batch.map(async (row) => {
       row.classList.add("ghpr-processed");
-      const prRow = row.closest("[id^='issue_']") || row;
-      const prNumber = getPRNumberFromRow(prRow);
-      if (!prNumber) return;
+      const prNumber = getPRNumberFromRow(row);
+      if (!prNumber) {
+        console.debug("[GHPR] Could not extract PR number from row", row.id);
+        return;
+      }
 
-      const response = await fetchEnhancedPR(owner, repo, prNumber);
-      if (response.success) {
-        injectPRInfo(prRow, response.data);
+      try {
+        const response = await fetchEnhancedPR(owner, repo, prNumber);
+        if (response && response.success) {
+          injectPRInfo(row, response.data);
+        } else {
+          console.debug("[GHPR] API error for PR #" + prNumber, response?.error);
+        }
+      } catch (err) {
+        console.debug("[GHPR] Failed to fetch PR #" + prNumber, err);
       }
     });
     await Promise.all(promises);
@@ -238,8 +261,9 @@ async function enhancePRList(): Promise<void> {
 // ── Bootstrap ──
 
 async function init() {
-  // fetch current user first (for reviewer highlighting)
+  console.log("[GHPR] GitHub PR Enhancer loaded on", window.location.pathname);
   await fetchCurrentUser();
+  console.log("[GHPR] Current user:", currentUserLogin ?? "(unauthenticated)");
   await enhancePRList();
 }
 
