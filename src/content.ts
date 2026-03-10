@@ -52,7 +52,53 @@ async function fetchPRFromPage(owner: string, repo: string, prNumber: number): P
     }
     const html = await response.text();
     const doc = new DOMParser().parseFromString(html, "text/html");
-    return parsePRPage(doc, owner, repo, prNumber);
+    const data = parsePRPage(doc, owner, repo, prNumber);
+
+    // If diff stats are 0, try fetching the /files tab for a summary
+    if (data.pr.additions === 0 && data.pr.deletions === 0 && data.pr.changed_files === 0) {
+      try {
+        const filesResp = await fetch(`/${owner}/${repo}/pull/${prNumber}/files`, {
+          credentials: "same-origin",
+        });
+        if (filesResp.ok) {
+          const filesHtml = await filesResp.text();
+          const filesDoc = new DOMParser().parseFromString(filesHtml, "text/html");
+
+          // Try counting diff elements on the files page
+          let additions = filesDoc.querySelectorAll('.blob-num-addition:not(.empty-cell)').length;
+          let deletions = filesDoc.querySelectorAll('.blob-num-deletion:not(.empty-cell)').length;
+          let changedFiles = filesDoc.querySelectorAll('.file[data-file-type]').length || filesDoc.querySelectorAll('.diff-table').length;
+
+          // Fallback: look for toc entries (file list in sidebar)
+          if (changedFiles === 0) {
+            changedFiles = filesDoc.querySelectorAll('.file-info').length;
+          }
+
+          // Fallback: text-based extraction
+          const filesText = filesDoc.body?.textContent || "";
+          if (additions === 0 && deletions === 0) {
+            const addMatch = filesText.match(/([\d,]+)\s+insertion/);
+            const delMatch = filesText.match(/([\d,]+)\s+deletion/);
+            if (addMatch) additions = parseInt(addMatch[1].replace(/,/g, ""), 10);
+            if (delMatch) deletions = parseInt(delMatch[1].replace(/,/g, ""), 10);
+          }
+          if (changedFiles === 0) {
+            const filesMatch = filesText.match(/([\d,]+)\s+files?\s+changed/);
+            if (filesMatch) changedFiles = parseInt(filesMatch[1].replace(/,/g, ""), 10);
+          }
+
+          if (additions > 0 || deletions > 0 || changedFiles > 0) {
+            data.pr.additions = additions;
+            data.pr.deletions = deletions;
+            data.pr.changed_files = changedFiles;
+          }
+        }
+      } catch {
+        // silently ignore — we still have data from the main page
+      }
+    }
+
+    return data;
   } catch (err) {
     console.debug("[GHPR] fetchPRFromPage error:", err);
     return null;
@@ -321,6 +367,50 @@ function buildReviewTitle(summary: ReviewSummary): string {
   return parts.length > 0 ? parts.join("\n") : "No reviews yet";
 }
 
+// ── Read CI status from the list page row (already rendered by GitHub) ──
+
+function readCIFromRow(row: Element): CIStatus {
+  const ciEl = row.querySelector('[aria-label*="check"]');
+  if (!ciEl) return { total: 0, passed: 0, failed: 0, pending: 0, overall: "none" };
+
+  const label = ciEl.getAttribute("aria-label") || "";
+  // e.g. "1 / 1 checks OK", "2 / 3 checks OK"
+  const match = label.match(/(\d+)\s*\/\s*(\d+)\s*checks?\s*(OK)?/i);
+  if (match) {
+    const passed = parseInt(match[1], 10);
+    const total = parseInt(match[2], 10);
+    const allOk = match[3] !== undefined;
+    const failed = total - passed;
+    return {
+      total,
+      passed,
+      failed,
+      pending: 0,
+      overall: allOk && failed === 0 ? "success" : failed > 0 ? "failure" : "pending",
+    };
+  }
+
+  // fallback: just detect presence
+  if (label.toLowerCase().includes("ok") || label.toLowerCase().includes("success")) {
+    return { total: 1, passed: 1, failed: 0, pending: 0, overall: "success" };
+  }
+  if (label.toLowerCase().includes("fail")) {
+    return { total: 1, passed: 0, failed: 1, pending: 0, overall: "failure" };
+  }
+  return { total: 1, passed: 0, failed: 0, pending: 1, overall: "pending" };
+}
+
+// ── Read draft status from the list page row ──
+
+function isDraftFromRow(row: Element): boolean {
+  // GitHub renders "Draft" as a tooltip or label on the PR icon
+  const prIcon = row.querySelector('svg.octicon-git-pull-request-draft');
+  if (prIcon) return true;
+  const titleEl = row.querySelector('[aria-label*="Draft"]');
+  if (titleEl) return true;
+  return false;
+}
+
 // ── Main loop ──
 
 async function enhancePRList(): Promise<void> {
@@ -349,6 +439,12 @@ async function enhancePRList(): Promise<void> {
       try {
         const data = await fetchPRFromPage(owner, repo, prNumber);
         if (data) {
+          // Override CI with info from the list page (already rendered, more reliable)
+          data.ci = readCIFromRow(row);
+          // Supplement draft status from list page
+          if (!data.pr.draft && isDraftFromRow(row)) {
+            data.pr.draft = true;
+          }
           injectPRInfo(row, data);
         } else {
           console.debug("[GHPR] No data for PR #" + prNumber);
