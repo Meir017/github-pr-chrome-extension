@@ -1,0 +1,70 @@
+/* ── GitHub PR Enhancer Styles ── */
+
+.ghpr-enhancements {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.ghpr-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  line-height: 18px;
+  white-space: nowrap;
+  letter-spacing: 0.2px;
+}
+
+.ghpr-diff-stats {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  gap: 2px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background-color: rgba(110, 118, 129, 0.1);
+}
+
+.ghpr-additions {
+  color: #28a745;
+  font-weight: 600;
+}
+
+.ghpr-deletions {
+  color: #cb2431;
+  font-weight: 600;
+}
+
+.ghpr-age-badge {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Size badge pulse animation for XL PRs */
+.ghpr-badge[title*="XL"] {
+  animation: ghpr-pulse 2s ease-in-out infinite;
+}
+
+@keyframes ghpr-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.8; }
+}
+
+/* Dark mode support (GitHub's dark themes) */
+@media (prefers-color-scheme: dark) {
+  .ghpr-diff-stats {
+    background-color: rgba(110, 118, 129, 0.2);
+  }
+}
+
+/* Also handle GitHub's data-color-mode attribute */
+[data-color-mode="dark"] .ghpr-diff-stats,
+[data-dark-theme] .ghpr-diff-stats {
+  background-color: rgba(110, 118, 129, 0.2);
+}

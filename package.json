@@ -1,0 +1,13 @@
+{
+  "name": "github-pr-chrome-extension",
+  "version": "1.0.0",
+  "description": "Enhance GitHub PR list pages with size labels, diff stats, age indicators and more",
+  "scripts": {
+    "build": "bun run build.ts",
+    "watch": "bun run build.ts --watch"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "typescript": "^5.7.0"
+  }
+}
