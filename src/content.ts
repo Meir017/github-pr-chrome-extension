@@ -1,7 +1,6 @@
 import {
   calculatePRSize,
   getSizeColor,
-  formatRelativeTime,
   getAgeColor,
   summarizeReviews,
   getReviewBadgeInfo,
@@ -54,7 +53,7 @@ async function fetchPRFromPage(owner: string, repo: string, prNumber: number): P
     const doc = new DOMParser().parseFromString(html, "text/html");
     const data = parsePRPage(doc, owner, repo, prNumber);
 
-    // If diff stats are 0, try fetching the /files tab for a summary
+    // If diff stats are 0, fetch the /files tab and parse the React JSON payload
     if (data.pr.additions === 0 && data.pr.deletions === 0 && data.pr.changed_files === 0) {
       try {
         const filesResp = await fetch(`/${owner}/${repo}/pull/${prNumber}/files`, {
@@ -64,33 +63,21 @@ async function fetchPRFromPage(owner: string, repo: string, prNumber: number): P
           const filesHtml = await filesResp.text();
           const filesDoc = new DOMParser().parseFromString(filesHtml, "text/html");
 
-          // Try counting diff elements on the files page
-          let additions = filesDoc.querySelectorAll('.blob-num-addition:not(.empty-cell)').length;
-          let deletions = filesDoc.querySelectorAll('.blob-num-deletion:not(.empty-cell)').length;
-          let changedFiles = filesDoc.querySelectorAll('.file[data-file-type]').length || filesDoc.querySelectorAll('.diff-table').length;
-
-          // Fallback: look for toc entries (file list in sidebar)
-          if (changedFiles === 0) {
-            changedFiles = filesDoc.querySelectorAll('.file-info').length;
-          }
-
-          // Fallback: text-based extraction
-          const filesText = filesDoc.body?.textContent || "";
-          if (additions === 0 && deletions === 0) {
-            const addMatch = filesText.match(/([\d,]+)\s+insertion/);
-            const delMatch = filesText.match(/([\d,]+)\s+deletion/);
-            if (addMatch) additions = parseInt(addMatch[1].replace(/,/g, ""), 10);
-            if (delMatch) deletions = parseInt(delMatch[1].replace(/,/g, ""), 10);
-          }
-          if (changedFiles === 0) {
-            const filesMatch = filesText.match(/([\d,]+)\s+files?\s+changed/);
-            if (filesMatch) changedFiles = parseInt(filesMatch[1].replace(/,/g, ""), 10);
-          }
-
-          if (additions > 0 || deletions > 0 || changedFiles > 0) {
-            data.pr.additions = additions;
-            data.pr.deletions = deletions;
-            data.pr.changed_files = changedFiles;
+          // GitHub embeds diff data in a React JSON payload
+          const reactEl = filesDoc.querySelector('[data-target="react-app.embeddedData"]');
+          if (reactEl?.textContent) {
+            const reactData = JSON.parse(reactEl.textContent);
+            const diffSummaries = reactData?.payload?.pullRequestsChangesRoute?.diffSummaries;
+            if (Array.isArray(diffSummaries) && diffSummaries.length > 0) {
+              let additions = 0, deletions = 0;
+              for (const file of diffSummaries) {
+                additions += file.linesAdded || 0;
+                deletions += file.linesDeleted || 0;
+              }
+              data.pr.additions = additions;
+              data.pr.deletions = deletions;
+              data.pr.changed_files = diffSummaries.length;
+            }
           }
         }
       } catch {
@@ -286,6 +273,16 @@ function createDiffStats(additions: number, deletions: number): HTMLSpanElement 
   return container;
 }
 
+// ── Color the existing GitHub timestamp based on PR age ──
+
+function colorExistingTimestamp(row: Element, createdAt: string): void {
+  const timeEl = row.querySelector("relative-time");
+  if (!timeEl) return;
+  const color = getAgeColor(createdAt);
+  const el = timeEl as HTMLElement;
+  el.style.cssText = `color: ${color} !important; font-weight: 600 !important;`;
+}
+
 // ── Injection ──
 
 function injectPRInfo(row: Element, data: EnhancedPRData): void {
@@ -294,7 +291,7 @@ function injectPRInfo(row: Element, data: EnhancedPRData): void {
   const { pr, reviews, ci, comparison } = data;
   const reviewSummary = summarizeReviews(reviews);
 
-  // ── Row 1: size, diff stats, files, age, draft ──
+  // ── Row 1: size, diff stats, files, draft ──
   const row1 = document.createElement("div");
   row1.className = "ghpr-enhancements";
 
@@ -303,14 +300,12 @@ function injectPRInfo(row: Element, data: EnhancedPRData): void {
   row1.appendChild(createDiffStats(pr.additions, pr.deletions));
   row1.appendChild(createBadge(`${pr.changed_files} file${pr.changed_files !== 1 ? "s" : ""}`, "#6f42c1", `${pr.changed_files} files changed`));
 
-  const ageColor = getAgeColor(pr.created_at);
-  const ageBadge = createBadge(formatRelativeTime(pr.created_at), ageColor, `Created: ${new Date(pr.created_at).toLocaleDateString()}`);
-  ageBadge.classList.add("ghpr-age-badge");
-  row1.appendChild(ageBadge);
-
   if (pr.draft) {
     row1.appendChild(createBadge("Draft", "#6a737d", "This is a draft PR"));
   }
+
+  // ── Color the existing "opened X ago" timestamp based on age ──
+  colorExistingTimestamp(row, pr.created_at);
 
   // ── Row 2: review status, CI, merge conflicts, staleness, reviewer highlight, comments ──
   const row2 = document.createElement("div");
