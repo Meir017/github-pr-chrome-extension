@@ -8,36 +8,166 @@ import {
   getCIBadgeInfo,
   getMergeabilityInfo,
   getStalenessInfo,
+  summarizeCI,
   type EnhancedPRData,
   type PullRequestDetails,
+  type ReviewInfo,
+  type CheckRunInfo,
   type CIStatus,
   type ReviewSummary,
   type BranchComparison,
 } from "./utils/pr-helpers";
-import type { EnhancedPRResponse, ErrorResponse } from "./background";
 
-// ── Current user cache ──
+// ── Current user ──
 let currentUserLogin: string | null = null;
 
-function fetchCurrentUser(): Promise<string | null> {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage(
-      { type: "FETCH_CURRENT_USER" },
-      (response: any) => {
-        if (chrome.runtime.lastError) {
-          console.debug("[GHPR] fetchCurrentUser error:", chrome.runtime.lastError.message);
-          resolve(null);
-          return;
-        }
-        if (response?.success) {
-          currentUserLogin = response.login;
-          resolve(response.login);
-        } else {
-          resolve(null);
-        }
-      }
-    );
+function detectCurrentUser(): void {
+  // GitHub embeds the logged-in user's login in the page's meta tags
+  const meta = document.querySelector('meta[name="user-login"]');
+  if (meta) {
+    currentUserLogin = meta.getAttribute("content");
+  }
+}
+
+// ── Same-origin fetch (uses session cookies — no PAT needed) ──
+
+async function ghFetch(path: string): Promise<Response> {
+  return fetch(`https://github.com${path}`, {
+    headers: { Accept: "application/json", "X-Requested-With": "XMLHttpRequest" },
+    credentials: "same-origin",
   });
+}
+
+// ── Data fetching via same-origin page requests ──
+
+async function fetchPRFromPage(owner: string, repo: string, prNumber: number): Promise<EnhancedPRData | null> {
+  try {
+    // Fetch the PR page HTML — same origin, session cookies included
+    const response = await fetch(`/${owner}/${repo}/pull/${prNumber}`, {
+      credentials: "same-origin",
+    });
+    if (!response.ok) {
+      console.debug(`[GHPR] PR page fetch failed: ${response.status}`);
+      return null;
+    }
+    const html = await response.text();
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    return parsePRPage(doc, owner, repo, prNumber);
+  } catch (err) {
+    console.debug("[GHPR] fetchPRFromPage error:", err);
+    return null;
+  }
+}
+
+function parsePRPage(doc: Document, owner: string, repo: string, prNumber: number): EnhancedPRData {
+  // ── Parse diff stats by counting actual diff lines ──
+  let additions = doc.querySelectorAll('.blob-num-addition:not(.empty-cell)').length;
+  let deletions = doc.querySelectorAll('.blob-num-deletion:not(.empty-cell)').length;
+  let changedFiles = doc.querySelectorAll('.diff-table').length;
+
+  // Fallback: look for summary text like "3 files changed, 45 insertions(+), 12 deletions(-)"
+  const bodyText = doc.body?.textContent || "";
+  if (additions === 0 && deletions === 0) {
+    const addMatch = bodyText.match(/([\d,]+)\s+insertion/);
+    const delMatch = bodyText.match(/([\d,]+)\s+deletion/);
+    if (addMatch) additions = parseInt(addMatch[1].replace(/,/g, ""), 10);
+    if (delMatch) deletions = parseInt(delMatch[1].replace(/,/g, ""), 10);
+  }
+  if (changedFiles === 0) {
+    const filesMatch = bodyText.match(/([\d,]+)\s+files?\s+changed/);
+    if (filesMatch) changedFiles = parseInt(filesMatch[1].replace(/,/g, ""), 10);
+  }
+
+  // ── Parse timestamps ──
+  const timeEl = doc.querySelector("relative-time");
+  const createdAt = timeEl?.getAttribute("datetime") || new Date().toISOString();
+
+  // ── Parse draft status ──
+  const isDraft = !!doc.querySelector('[title="Status: Draft"]')
+    || bodyText.includes("Draft pull request")
+    || !!doc.querySelector(".gh-header-meta .State--draft");
+
+  // ── Parse merge state from the merge box ──
+  let mergeableState = "unknown";
+  const mergeArea = doc.querySelector('.merge-message, .merging-body, [data-merge-box]');
+  if (mergeArea) {
+    const text = mergeArea.textContent?.toLowerCase() || "";
+    if (text.includes("conflict")) mergeableState = "dirty";
+    else if (text.includes("blocked")) mergeableState = "blocked";
+    else if (text.includes("can be merged") || text.includes("squash and merge") || text.includes("able to merge")) mergeableState = "clean";
+  }
+
+  // ── Parse reviews from the sidebar ──
+  const reviews: ReviewInfo[] = [];
+  doc.querySelectorAll('.sidebar-assignee .reviewers-status-icon, .review-status-item, [data-hovercard-type="user"]').forEach((el) => {
+    const svgClasses = el.querySelector("svg")?.classList?.toString() || el.className?.toString?.() || "";
+    const parentEl = el.closest("li, .review-status-item, .sidebar-assignee");
+    const user = parentEl?.querySelector("a.assignee, a[data-hovercard-type='user']")?.textContent?.trim() || "reviewer";
+    let state: ReviewInfo["state"] = "COMMENTED";
+    if (svgClasses.includes("color-fg-done") || svgClasses.includes("color-fg-success")) state = "APPROVED";
+    else if (svgClasses.includes("color-fg-attention") || svgClasses.includes("color-fg-danger")) state = "CHANGES_REQUESTED";
+    if (user !== "reviewer") {
+      reviews.push({ user, state, submitted_at: createdAt });
+    }
+  });
+
+  // ── Parse requested reviewers ──
+  const requestedReviewers: string[] = [];
+
+  // ── Parse CI status from merge box ──
+  const checkRuns: CheckRunInfo[] = [];
+  doc.querySelectorAll('.merge-status-item, .branch-action-item').forEach((el) => {
+    const text = el.textContent?.trim() || "";
+    const name = text.substring(0, 60);
+    const svgClasses = el.querySelector("svg")?.classList?.toString() || "";
+    let status: CheckRunInfo["status"] = "completed";
+    let conclusion: CheckRunInfo["conclusion"] = null;
+    if (svgClasses.includes("color-fg-success") || svgClasses.includes("octicon-check")) conclusion = "success";
+    else if (svgClasses.includes("color-fg-danger") || svgClasses.includes("octicon-x")) conclusion = "failure";
+    else if (svgClasses.includes("color-fg-attention") || svgClasses.includes("octicon-dot-fill")) { status = "in_progress"; }
+    checkRuns.push({ name, status, conclusion });
+  });
+
+  // ── Parse labels ──
+  const labels: Array<{ name: string; color: string }> = [];
+  doc.querySelectorAll('.IssueLabel, .js-issue-labels .label').forEach((el) => {
+    labels.push({
+      name: el.textContent?.trim() || "",
+      color: (el as HTMLElement).style.backgroundColor || "#ededed",
+    });
+  });
+
+  // ── Parse review comment count from the tab ──
+  let reviewComments = 0;
+  const tabCounter = doc.querySelector('#conversation_tab_counter');
+  if (tabCounter) {
+    const n = parseInt(tabCounter.textContent?.trim() || "0", 10);
+    if (!isNaN(n)) reviewComments = n;
+  }
+
+  const pr: PullRequestDetails = {
+    number: prNumber,
+    title: doc.querySelector(".gh-header-title .js-issue-title")?.textContent?.trim() || `PR #${prNumber}`,
+    additions,
+    deletions,
+    changed_files: changedFiles,
+    created_at: createdAt,
+    updated_at: createdAt,
+    merged_at: null,
+    draft: isDraft,
+    mergeable_state: mergeableState,
+    labels,
+    head_sha: "",
+    head_ref: doc.querySelector(".head-ref")?.textContent?.trim() || "",
+    base_ref: doc.querySelector(".base-ref")?.textContent?.trim() || "",
+    user_login: doc.querySelector(".gh-header-meta .author")?.textContent?.trim() || "",
+    requested_reviewers: requestedReviewers,
+    review_comments: reviewComments,
+  };
+
+  const ci = summarizeCI(null, checkRuns);
+
+  return { pr, reviews, ci, comparison: null };
 }
 
 // ── URL parsing ──
@@ -60,32 +190,6 @@ function getPRNumberFromRow(row: Element): number | null {
     if (match) return parseInt(match[1], 10);
   }
   return null;
-}
-
-// ── API call ──
-
-function fetchEnhancedPR(
-  owner: string,
-  repo: string,
-  prNumber: number
-): Promise<EnhancedPRResponse | ErrorResponse> {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage(
-      { type: "FETCH_PR_ENHANCED", owner, repo, prNumber },
-      (response: EnhancedPRResponse | ErrorResponse) => {
-        if (chrome.runtime.lastError) {
-          console.debug("[GHPR] sendMessage error:", chrome.runtime.lastError.message);
-          resolve({ success: false, error: chrome.runtime.lastError.message ?? "Unknown error" });
-          return;
-        }
-        if (!response) {
-          resolve({ success: false, error: "No response from background worker" });
-          return;
-        }
-        resolve(response);
-      }
-    );
-  });
 }
 
 // ── DOM helpers ──
@@ -223,14 +327,13 @@ async function enhancePRList(): Promise<void> {
   const repoInfo = parseRepoFromURL();
   if (!repoInfo) return;
 
-  // Only target the row-level divs, not the inner link elements
   const rows = document.querySelectorAll(
     '.js-issue-row:not(.ghpr-processed)'
   );
   if (rows.length === 0) return;
 
   const { owner, repo } = repoInfo;
-  const BATCH_SIZE = 5;
+  const BATCH_SIZE = 3; // smaller batches — each fetches a full page
   const rowArray = Array.from(rows);
 
   for (let i = 0; i < rowArray.length; i += BATCH_SIZE) {
@@ -244,11 +347,11 @@ async function enhancePRList(): Promise<void> {
       }
 
       try {
-        const response = await fetchEnhancedPR(owner, repo, prNumber);
-        if (response && response.success) {
-          injectPRInfo(row, response.data);
+        const data = await fetchPRFromPage(owner, repo, prNumber);
+        if (data) {
+          injectPRInfo(row, data);
         } else {
-          console.debug("[GHPR] API error for PR #" + prNumber, response?.error);
+          console.debug("[GHPR] No data for PR #" + prNumber);
         }
       } catch (err) {
         console.debug("[GHPR] Failed to fetch PR #" + prNumber, err);
@@ -262,8 +365,8 @@ async function enhancePRList(): Promise<void> {
 
 async function init() {
   console.log("[GHPR] GitHub PR Enhancer loaded on", window.location.pathname);
-  await fetchCurrentUser();
-  console.log("[GHPR] Current user:", currentUserLogin ?? "(unauthenticated)");
+  detectCurrentUser();
+  console.log("[GHPR] Current user:", currentUserLogin ?? "(not detected)");
   await enhancePRList();
 }
 
