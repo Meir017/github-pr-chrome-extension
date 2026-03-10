@@ -11,6 +11,12 @@ A Chrome extension that enhances GitHub's Pull Request list pages with useful at
 | **Files Changed** | Number of files touched by the PR |
 | **Age Indicator** | Color-coded relative time (green → red as the PR ages) |
 | **Draft Badge** | Indicates draft PRs |
+| **Review Status** | ✓ Approved / ✕ Changes requested / ● Pending — with reviewer names on hover |
+| **CI Status** | ✓ Passed / ✕ Failed / ◔ Pending — combined check runs & statuses |
+| **Merge Conflicts** | ⚠ Warning badge when the PR has merge conflicts or is blocked |
+| **Branch Staleness** | ↓ Shows how many commits behind the base branch |
+| **Review Requested** | 👁 Highlights PRs where *you* are a requested reviewer (blue left border) |
+| **Comment Count** | 💬 Number of review comments on the PR |
 
 ### Size Thresholds
 

@@ -8,6 +8,10 @@
   flex-wrap: wrap;
 }
 
+.ghpr-status-row {
+  margin-top: 2px;
+}
+
 .ghpr-badge {
   display: inline-flex;
   align-items: center;
@@ -19,6 +23,15 @@
   line-height: 18px;
   white-space: nowrap;
   letter-spacing: 0.2px;
+}
+
+.ghpr-icon-badge {
+  gap: 3px;
+}
+
+.ghpr-badge-icon {
+  font-size: 10px;
+  line-height: 1;
 }
 
 .ghpr-diff-stats {
@@ -46,6 +59,12 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Highlight rows where you are a requested reviewer */
+.ghpr-review-requested {
+  border-left: 3px solid #0969da !important;
+  background-color: rgba(9, 105, 218, 0.04) !important;
+}
+
 /* Size badge pulse animation for XL PRs */
 .ghpr-badge[title*="XL"] {
   animation: ghpr-pulse 2s ease-in-out infinite;
@@ -61,10 +80,17 @@
   .ghpr-diff-stats {
     background-color: rgba(110, 118, 129, 0.2);
   }
+  .ghpr-review-requested {
+    background-color: rgba(9, 105, 218, 0.08) !important;
+  }
 }
 
-/* Also handle GitHub's data-color-mode attribute */
 [data-color-mode="dark"] .ghpr-diff-stats,
 [data-dark-theme] .ghpr-diff-stats {
   background-color: rgba(110, 118, 129, 0.2);
+}
+
+[data-color-mode="dark"] .ghpr-review-requested,
+[data-dark-theme] .ghpr-review-requested {
+  background-color: rgba(9, 105, 218, 0.08) !important;
 }

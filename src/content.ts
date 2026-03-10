@@ -3,9 +3,39 @@ import {
   getSizeColor,
   formatRelativeTime,
   getAgeColor,
+  summarizeReviews,
+  getReviewBadgeInfo,
+  getCIBadgeInfo,
+  getMergeabilityInfo,
+  getStalenessInfo,
+  type EnhancedPRData,
   type PullRequestDetails,
+  type CIStatus,
+  type ReviewSummary,
+  type BranchComparison,
 } from "./utils/pr-helpers";
-import type { PRResponse, ErrorResponse } from "./background";
+import type { EnhancedPRResponse, ErrorResponse } from "./background";
+
+// ── Current user cache ──
+let currentUserLogin: string | null = null;
+
+function fetchCurrentUser(): Promise<string | null> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(
+      { type: "FETCH_CURRENT_USER" },
+      (response: any) => {
+        if (response?.success) {
+          currentUserLogin = response.login;
+          resolve(response.login);
+        } else {
+          resolve(null);
+        }
+      }
+    );
+  });
+}
+
+// ── URL parsing ──
 
 function parseRepoFromURL(): { owner: string; repo: string } | null {
   const match = window.location.pathname.match(/^\/([^/]+)\/([^/]+)\/pulls/);
@@ -19,7 +49,6 @@ function getPRNumberFromRow(row: Element): number | null {
     const match = link.id.match(/issue_(\d+)/);
     if (match) return parseInt(match[1], 10);
   }
-  // fallback: parse from href
   const prLink = row.querySelector<HTMLAnchorElement>('a[href*="/pull/"]');
   if (prLink) {
     const match = prLink.href.match(/\/pull\/(\d+)/);
@@ -28,20 +57,24 @@ function getPRNumberFromRow(row: Element): number | null {
   return null;
 }
 
-function fetchPRDetails(
+// ── API call ──
+
+function fetchEnhancedPR(
   owner: string,
   repo: string,
   prNumber: number
-): Promise<PRResponse | ErrorResponse> {
+): Promise<EnhancedPRResponse | ErrorResponse> {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage(
-      { type: "FETCH_PR", owner, repo, prNumber },
-      (response: PRResponse | ErrorResponse) => {
+      { type: "FETCH_PR_ENHANCED", owner, repo, prNumber },
+      (response: EnhancedPRResponse | ErrorResponse) => {
         resolve(response);
       }
     );
   });
 }
+
+// ── DOM helpers ──
 
 function createBadge(text: string, bgColor: string, title: string): HTMLSpanElement {
   const badge = document.createElement("span");
@@ -49,6 +82,24 @@ function createBadge(text: string, bgColor: string, title: string): HTMLSpanElem
   badge.textContent = text;
   badge.title = title;
   badge.style.backgroundColor = bgColor;
+  return badge;
+}
+
+function createIconBadge(icon: string, text: string, bgColor: string, title: string): HTMLSpanElement {
+  const badge = document.createElement("span");
+  badge.className = "ghpr-badge ghpr-icon-badge";
+  badge.title = title;
+  badge.style.backgroundColor = bgColor;
+
+  const iconSpan = document.createElement("span");
+  iconSpan.className = "ghpr-badge-icon";
+  iconSpan.textContent = icon;
+
+  const textSpan = document.createElement("span");
+  textSpan.textContent = text;
+
+  badge.appendChild(iconSpan);
+  badge.appendChild(textSpan);
   return badge;
 }
 
@@ -68,82 +119,102 @@ function createDiffStats(additions: number, deletions: number): HTMLSpanElement 
   container.appendChild(addSpan);
   container.appendChild(document.createTextNode(" / "));
   container.appendChild(delSpan);
-
   return container;
 }
 
-function createInfoContainer(): HTMLDivElement {
-  const container = document.createElement("div");
-  container.className = "ghpr-enhancements";
-  return container;
-}
+// ── Injection ──
 
-function injectPRInfo(row: Element, pr: PullRequestDetails): void {
-  // avoid double-injection
+function injectPRInfo(row: Element, data: EnhancedPRData): void {
   if (row.querySelector(".ghpr-enhancements")) return;
 
+  const { pr, reviews, ci, comparison } = data;
+  const reviewSummary = summarizeReviews(reviews);
+
+  // ── Row 1: size, diff stats, files, age, draft ──
+  const row1 = document.createElement("div");
+  row1.className = "ghpr-enhancements";
+
   const size = calculatePRSize(pr.additions, pr.deletions);
-  const sizeColor = getSizeColor(size);
+  row1.appendChild(createBadge(size, getSizeColor(size), `PR Size: ${size} (${pr.additions + pr.deletions} lines)`));
+  row1.appendChild(createDiffStats(pr.additions, pr.deletions));
+  row1.appendChild(createBadge(`${pr.changed_files} file${pr.changed_files !== 1 ? "s" : ""}`, "#6f42c1", `${pr.changed_files} files changed`));
+
   const ageColor = getAgeColor(pr.created_at);
-  const relativeTime = formatRelativeTime(pr.created_at);
-
-  const container = createInfoContainer();
-
-  // size badge
-  const sizeBadge = createBadge(
-    size,
-    sizeColor,
-    `PR Size: ${size} (${pr.additions + pr.deletions} lines changed)`
-  );
-  container.appendChild(sizeBadge);
-
-  // diff stats
-  const diffStats = createDiffStats(pr.additions, pr.deletions);
-  container.appendChild(diffStats);
-
-  // files changed
-  const filesBadge = createBadge(
-    `${pr.changed_files} file${pr.changed_files !== 1 ? "s" : ""}`,
-    "#6f42c1",
-    `${pr.changed_files} files changed`
-  );
-  container.appendChild(filesBadge);
-
-  // age indicator
-  const ageBadge = createBadge(relativeTime, ageColor, `Created: ${new Date(pr.created_at).toLocaleDateString()}`);
+  const ageBadge = createBadge(formatRelativeTime(pr.created_at), ageColor, `Created: ${new Date(pr.created_at).toLocaleDateString()}`);
   ageBadge.classList.add("ghpr-age-badge");
-  container.appendChild(ageBadge);
+  row1.appendChild(ageBadge);
 
-  // draft indicator
   if (pr.draft) {
-    const draftBadge = createBadge("Draft", "#6a737d", "This is a draft PR");
-    container.appendChild(draftBadge);
+    row1.appendChild(createBadge("Draft", "#6a737d", "This is a draft PR"));
   }
 
-  // find the right place to inject — after the PR title/meta row
+  // ── Row 2: review status, CI, merge conflicts, staleness, reviewer highlight, comments ──
+  const row2 = document.createElement("div");
+  row2.className = "ghpr-enhancements ghpr-status-row";
+
+  // Review status
+  const reviewInfo = getReviewBadgeInfo(reviewSummary.overall);
+  const reviewTitle = buildReviewTitle(reviewSummary);
+  row2.appendChild(createIconBadge(reviewInfo.icon, reviewInfo.text, reviewInfo.color, reviewTitle));
+
+  // CI status
+  const ciInfo = getCIBadgeInfo(ci);
+  row2.appendChild(createIconBadge(ciInfo.icon, ciInfo.text, ciInfo.color, `CI: ${ciInfo.text}`));
+
+  // Merge conflict
+  const mergeInfo = getMergeabilityInfo(pr.mergeable_state);
+  if (mergeInfo) {
+    row2.appendChild(createIconBadge(mergeInfo.icon, mergeInfo.text, mergeInfo.color, `Merge status: ${mergeInfo.text}`));
+  }
+
+  // Branch staleness
+  const stalenessInfo = getStalenessInfo(comparison);
+  if (stalenessInfo) {
+    row2.appendChild(createIconBadge("↓", stalenessInfo.text, stalenessInfo.color, `Branch is ${stalenessInfo.text} ${pr.base_ref}`));
+  }
+
+  // Requested reviewer highlight (you)
+  if (currentUserLogin && pr.requested_reviewers.includes(currentUserLogin)) {
+    row2.appendChild(createIconBadge("👁", "Review requested", "#0969da", "You have been requested to review this PR"));
+    row.classList.add("ghpr-review-requested");
+  }
+
+  // Review comments count
+  if (pr.review_comments > 0) {
+    row2.appendChild(createIconBadge("💬", `${pr.review_comments}`, "#6e7781", `${pr.review_comments} review comment${pr.review_comments !== 1 ? "s" : ""}`));
+  }
+
+  // ── Inject into DOM ──
   const titleLink = row.querySelector('a[id^="issue_"]') || row.querySelector('a[href*="/pull/"]');
   if (titleLink) {
     const parentEl = titleLink.closest("div") || titleLink.parentElement;
     if (parentEl) {
-      parentEl.appendChild(container);
+      parentEl.appendChild(row1);
+      parentEl.appendChild(row2);
     }
   }
 }
+
+function buildReviewTitle(summary: ReviewSummary): string {
+  const parts: string[] = [];
+  if (summary.approved.length > 0) parts.push(`Approved by: ${summary.approved.join(", ")}`);
+  if (summary.changesRequested.length > 0) parts.push(`Changes requested by: ${summary.changesRequested.join(", ")}`);
+  if (summary.commented.length > 0) parts.push(`Comments from: ${summary.commented.join(", ")}`);
+  return parts.length > 0 ? parts.join("\n") : "No reviews yet";
+}
+
+// ── Main loop ──
 
 async function enhancePRList(): Promise<void> {
   const repoInfo = parseRepoFromURL();
   if (!repoInfo) return;
 
-  // GitHub's PR list uses different selectors depending on the UI version
   const rows = document.querySelectorAll(
     '[id^="issue_"]:not(.ghpr-processed), .js-issue-row:not(.ghpr-processed)'
   );
-
   if (rows.length === 0) return;
 
   const { owner, repo } = repoInfo;
-
-  // process PRs in batches to avoid rate limiting
   const BATCH_SIZE = 5;
   const rowArray = Array.from(rows);
 
@@ -151,13 +222,11 @@ async function enhancePRList(): Promise<void> {
     const batch = rowArray.slice(i, i + BATCH_SIZE);
     const promises = batch.map(async (row) => {
       row.classList.add("ghpr-processed");
-
-      // try getting PR number from the row itself or a parent
       const prRow = row.closest("[id^='issue_']") || row;
       const prNumber = getPRNumberFromRow(prRow);
       if (!prNumber) return;
 
-      const response = await fetchPRDetails(owner, repo, prNumber);
+      const response = await fetchEnhancedPR(owner, repo, prNumber);
       if (response.success) {
         injectPRInfo(prRow, response.data);
       }
@@ -166,23 +235,27 @@ async function enhancePRList(): Promise<void> {
   }
 }
 
-// initial run
-enhancePRList();
+// ── Bootstrap ──
 
-// observe for dynamic page changes (GitHub uses Turbo/pjax)
+async function init() {
+  // fetch current user first (for reviewer highlighting)
+  await fetchCurrentUser();
+  await enhancePRList();
+}
+
+init();
+
+// observe dynamic changes
 const observer = new MutationObserver((mutations) => {
   for (const mutation of mutations) {
     if (mutation.addedNodes.length > 0) {
-      // debounce: wait a tick for the DOM to settle
       setTimeout(() => enhancePRList(), 300);
       break;
     }
   }
 });
-
 observer.observe(document.body, { childList: true, subtree: true });
 
-// also re-run on turbo navigation
 document.addEventListener("turbo:load", () => {
   setTimeout(() => enhancePRList(), 500);
 });
