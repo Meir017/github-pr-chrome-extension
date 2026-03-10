@@ -273,6 +273,35 @@ function createDiffStats(additions: number, deletions: number): HTMLSpanElement 
   return container;
 }
 
+// ── Enhance GitHub's existing CI status icon with extended text ──
+
+function enhanceExistingCIIcon(row: Element, ci: CIStatus): void {
+  const summary = row.querySelector('.commit-build-statuses > summary');
+  if (!summary || summary.querySelector('.ghpr-ci-text')) return;
+
+  if (ci.overall === "none") return;
+
+  const label = document.createElement("span");
+  label.className = "ghpr-ci-text";
+
+  if (ci.overall === "success") {
+    label.textContent = `${ci.passed}/${ci.total} passed`;
+    label.style.color = "#1a7f37";
+  } else if (ci.overall === "failure") {
+    const parts: string[] = [];
+    if (ci.passed > 0) parts.push(`${ci.passed} passed`);
+    parts.push(`${ci.failed} failed`);
+    label.textContent = parts.join(", ");
+    label.style.color = "#cf222e";
+  } else {
+    label.textContent = `${ci.pending} pending`;
+    label.style.color = "#9a6700";
+  }
+
+  label.style.cssText += "font-size: 12px; font-weight: 500; margin-left: 4px; vertical-align: middle;";
+  summary.appendChild(label);
+}
+
 // ── Color the existing GitHub timestamp based on PR age ──
 
 function colorExistingTimestamp(row: Element, createdAt: string): void {
@@ -309,9 +338,8 @@ function injectPRInfo(row: Element, data: EnhancedPRData): void {
   const reviewTitle = buildReviewTitle(reviewSummary);
   badgeRow.appendChild(createIconBadge(reviewInfo.icon, reviewInfo.text, reviewInfo.color, reviewTitle));
 
-  // CI status
-  const ciInfo = getCIBadgeInfo(ci);
-  badgeRow.appendChild(createIconBadge(ciInfo.icon, ciInfo.text, ciInfo.color, `CI: ${ciInfo.text}`));
+  // Enhance GitHub's existing CI icon with extended text (instead of our own badge)
+  enhanceExistingCIIcon(row, ci);
 
   // Merge conflict
   const mergeInfo = getMergeabilityInfo(pr.mergeable_state);
