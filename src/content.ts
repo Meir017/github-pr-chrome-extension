@@ -335,10 +335,6 @@ function injectPRInfo(row: Element, data: EnhancedPRData): void {
   badgeRow.appendChild(createDiffStats(pr.additions, pr.deletions));
   badgeRow.appendChild(createBadge(`${pr.changed_files} file${pr.changed_files !== 1 ? "s" : ""}`, "#6f42c1", `${pr.changed_files} files changed`));
 
-  if (pr.draft) {
-    badgeRow.appendChild(createBadge("Draft", "#6a737d", "This is a draft PR"));
-  }
-
   // Review status
   const reviewInfo = getReviewBadgeInfo(reviewSummary.overall);
   const reviewTitle = buildReviewTitle(reviewSummary);
