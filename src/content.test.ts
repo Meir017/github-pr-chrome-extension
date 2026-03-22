@@ -6,7 +6,7 @@ import {
   readReviewsFromRow,
   readCIFromRow,
   isDraftFromRow,
-} from "./content";
+} from "./content-helpers";
 
 // ── buildReviewTitle (pure function) ──
 
