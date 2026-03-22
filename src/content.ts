@@ -90,13 +90,13 @@ async function fetchPRData(owner: string, repo: string, prNumber: number, row: E
 
 // ── URL parsing ──
 
-function parseRepoFromURL(): { owner: string; repo: string } | null {
+export function parseRepoFromURL(): { owner: string; repo: string } | null {
   const match = window.location.pathname.match(/^\/([^/]+)\/([^/]+)\/pulls/);
   if (!match) return null;
   return { owner: match[1], repo: match[2] };
 }
 
-function getPRNumberFromRow(row: Element): number | null {
+export function getPRNumberFromRow(row: Element): number | null {
   const link = row.querySelector<HTMLAnchorElement>('a[id^="issue_"]');
   if (link) {
     const match = link.id.match(/issue_(\d+)/);
@@ -264,7 +264,7 @@ function injectPRInfo(row: Element, data: EnhancedPRData): void {
   }
 }
 
-function buildReviewTitle(summary: ReviewSummary): string {
+export function buildReviewTitle(summary: ReviewSummary): string {
   const parts: string[] = [];
   if (summary.approved.length > 0) parts.push(`Approved by: ${summary.approved.join(", ")}`);
   if (summary.changesRequested.length > 0) parts.push(`Changes requested by: ${summary.changesRequested.join(", ")}`);
@@ -274,7 +274,7 @@ function buildReviewTitle(summary: ReviewSummary): string {
 
 // ── Read review status from the list page row (already rendered by GitHub) ──
 
-function readReviewsFromRow(row: Element): ReviewSummary {
+export function readReviewsFromRow(row: Element): ReviewSummary {
   const reviewLink = row.querySelector('a[href*="#partial-pull-merging"]');
   if (!reviewLink) return { approved: [], changesRequested: [], commented: [], overall: "none" };
 
@@ -296,7 +296,7 @@ function readReviewsFromRow(row: Element): ReviewSummary {
 
 // ── Read CI status from the list page row (already rendered by GitHub) ──
 
-function readCIFromRow(row: Element): CIStatus {
+export function readCIFromRow(row: Element): CIStatus {
   const ciEl = row.querySelector('[aria-label*="check"]');
   if (!ciEl) return { total: 0, passed: 0, failed: 0, pending: 0, overall: "none" };
 
@@ -329,7 +329,7 @@ function readCIFromRow(row: Element): CIStatus {
 
 // ── Read draft status from the list page row ──
 
-function isDraftFromRow(row: Element): boolean {
+export function isDraftFromRow(row: Element): boolean {
   // GitHub renders "Draft" as a tooltip or label on the PR icon
   const prIcon = row.querySelector('svg.octicon-git-pull-request-draft');
   if (prIcon) return true;
@@ -378,28 +378,30 @@ async function enhancePRList(): Promise<void> {
   }
 }
 
-// ── Bootstrap ──
+// ── Bootstrap (skip in test environment) ──
 
-async function init() {
-  console.log("[GHPR] GitHub PR Enhancer loaded on", window.location.pathname);
-  detectCurrentUser();
-  console.log("[GHPR] Current user:", currentUserLogin ?? "(not detected)");
-  await enhancePRList();
-}
-
-init();
-
-// observe dynamic changes
-const observer = new MutationObserver((mutations) => {
-  for (const mutation of mutations) {
-    if (mutation.addedNodes.length > 0) {
-      setTimeout(() => enhancePRList(), 300);
-      break;
-    }
+if (typeof process === "undefined" || !process?.env?.VITEST) {
+  async function init() {
+    console.log("[GHPR] GitHub PR Enhancer loaded on", window.location.pathname);
+    detectCurrentUser();
+    console.log("[GHPR] Current user:", currentUserLogin ?? "(not detected)");
+    await enhancePRList();
   }
-});
-observer.observe(document.body, { childList: true, subtree: true });
 
-document.addEventListener("turbo:load", () => {
-  setTimeout(() => enhancePRList(), 500);
-});
+  init();
+
+  // observe dynamic changes
+  const observer = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      if (mutation.addedNodes.length > 0) {
+        setTimeout(() => enhancePRList(), 300);
+        break;
+      }
+    }
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+
+  document.addEventListener("turbo:load", () => {
+    setTimeout(() => enhancePRList(), 500);
+  });
+}

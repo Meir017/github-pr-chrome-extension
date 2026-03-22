@@ -4,10 +4,15 @@
   "description": "Enhance GitHub PR list pages with size labels, diff stats, age indicators and more",
   "scripts": {
     "build": "bun run build.ts",
-    "watch": "bun run build.ts --watch"
+    "watch": "bun run build.ts --watch",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.287",
-    "typescript": "^5.7.0"
+    "@vitest/coverage-v8": "^4.1.0",
+    "jsdom": "^29.0.1",
+    "typescript": "^5.7.0",
+    "vitest": "^4.1.0"
   }
 }
