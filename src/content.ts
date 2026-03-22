@@ -2,19 +2,13 @@ import {
   calculatePRSize,
   getSizeColor,
   getAgeColor,
-  summarizeReviews,
   getReviewBadgeInfo,
-  getCIBadgeInfo,
   getMergeabilityInfo,
   getStalenessInfo,
-  summarizeCI,
   type EnhancedPRData,
   type PullRequestDetails,
-  type ReviewInfo,
-  type CheckRunInfo,
   type CIStatus,
   type ReviewSummary,
-  type BranchComparison,
 } from "./utils/pr-helpers";
 
 // ── Current user ──
@@ -28,179 +22,70 @@ function detectCurrentUser(): void {
   }
 }
 
-// ── Same-origin fetch (uses session cookies — no PAT needed) ──
+// ── Same-origin JSON fetch (uses session cookies — no PAT needed) ──
 
-async function ghFetch(path: string): Promise<Response> {
-  return fetch(`https://github.com${path}`, {
+async function ghFetchJSON(path: string): Promise<any> {
+  const resp = await fetch(`https://github.com${path}`, {
     headers: { Accept: "application/json", "X-Requested-With": "XMLHttpRequest" },
     credentials: "same-origin",
   });
+  if (!resp.ok) throw new Error(`GitHub JSON fetch failed: ${resp.status}`);
+  return resp.json();
 }
 
-// ── Data fetching via same-origin page requests ──
+// ── Data fetching via same-origin JSON endpoint ──
 
-async function fetchPRFromPage(owner: string, repo: string, prNumber: number): Promise<EnhancedPRData | null> {
+async function fetchPRData(owner: string, repo: string, prNumber: number, row: Element): Promise<EnhancedPRData | null> {
   try {
-    // Fetch the PR page HTML — same origin, session cookies included
-    const response = await fetch(`/${owner}/${repo}/pull/${prNumber}`, {
-      credentials: "same-origin",
-    });
-    if (!response.ok) {
-      console.debug(`[GHPR] PR page fetch failed: ${response.status}`);
+    const json = await ghFetchJSON(`/${owner}/${repo}/pull/${prNumber}/files`);
+    const route = json?.payload?.pullRequestsChangesRoute;
+    if (!route) {
+      console.debug("[GHPR] No pullRequestsChangesRoute in JSON for PR #" + prNumber);
       return null;
     }
-    const html = await response.text();
-    const doc = new DOMParser().parseFromString(html, "text/html");
-    const data = parsePRPage(doc, owner, repo, prNumber);
 
-    // If diff stats are 0, fetch the /files tab and parse the React JSON payload
-    if (data.pr.additions === 0 && data.pr.deletions === 0 && data.pr.changed_files === 0) {
-      try {
-        const filesResp = await fetch(`/${owner}/${repo}/pull/${prNumber}/files`, {
-          credentials: "same-origin",
-        });
-        if (filesResp.ok) {
-          const filesHtml = await filesResp.text();
-          const filesDoc = new DOMParser().parseFromString(filesHtml, "text/html");
-
-          // GitHub embeds diff data in a React JSON payload
-          const reactEl = filesDoc.querySelector('[data-target="react-app.embeddedData"]');
-          if (reactEl?.textContent) {
-            const reactData = JSON.parse(reactEl.textContent);
-            const diffSummaries = reactData?.payload?.pullRequestsChangesRoute?.diffSummaries;
-            if (Array.isArray(diffSummaries) && diffSummaries.length > 0) {
-              let additions = 0, deletions = 0;
-              for (const file of diffSummaries) {
-                additions += file.linesAdded || 0;
-                deletions += file.linesDeleted || 0;
-              }
-              data.pr.additions = additions;
-              data.pr.deletions = deletions;
-              data.pr.changed_files = diffSummaries.length;
-            }
-          }
-        }
-      } catch {
-        // silently ignore — we still have data from the main page
-      }
+    // ── Diff stats from diffSummaries (accurate, never truncated) ──
+    const summaries: any[] = route.diffSummaries || [];
+    let additions = 0, deletions = 0;
+    for (const file of summaries) {
+      additions += file.linesAdded || 0;
+      deletions += file.linesDeleted || 0;
     }
 
-    return data;
+    // ── PR metadata from JSON ──
+    const prData = route.pullRequest || {};
+
+    // ── Timestamp from the list-page row ──
+    const timeEl = row.querySelector("relative-time");
+    const createdAt = timeEl?.getAttribute("datetime") || new Date().toISOString();
+
+    const pr: PullRequestDetails = {
+      number: prData.number || prNumber,
+      title: prData.title || `PR #${prNumber}`,
+      additions,
+      deletions,
+      changed_files: summaries.length,
+      created_at: createdAt,
+      updated_at: createdAt,
+      merged_at: prData.mergedTime || null,
+      draft: isDraftFromRow(row),
+      mergeable_state: "unknown",
+      labels: [],
+      head_sha: prData.comparison?.headOid || "",
+      head_ref: prData.headBranch || "",
+      base_ref: prData.baseBranch || "",
+      user_login: prData.author?.login || "",
+      requested_reviewers: [],
+      review_comments: prData.issueCommentsCount || 0,
+    };
+
+    const ci = readCIFromRow(row);
+
+    return { pr, reviews: [], ci, comparison: null };
   } catch (err) {
-    console.debug("[GHPR] fetchPRFromPage error:", err);
+    console.debug("[GHPR] fetchPRData error:", err);
     return null;
   }
-}
-
-function parsePRPage(doc: Document, owner: string, repo: string, prNumber: number): EnhancedPRData {
-  // ── Parse diff stats by counting actual diff lines ──
-  let additions = doc.querySelectorAll('.blob-num-addition:not(.empty-cell)').length;
-  let deletions = doc.querySelectorAll('.blob-num-deletion:not(.empty-cell)').length;
-  let changedFiles = doc.querySelectorAll('.diff-table').length;
-
-  // Fallback: look for summary text like "3 files changed, 45 insertions(+), 12 deletions(-)"
-  const bodyText = doc.body?.textContent || "";
-  if (additions === 0 && deletions === 0) {
-    const addMatch = bodyText.match(/([\d,]+)\s+insertion/);
-    const delMatch = bodyText.match(/([\d,]+)\s+deletion/);
-    if (addMatch) additions = parseInt(addMatch[1].replace(/,/g, ""), 10);
-    if (delMatch) deletions = parseInt(delMatch[1].replace(/,/g, ""), 10);
-  }
-  if (changedFiles === 0) {
-    const filesMatch = bodyText.match(/([\d,]+)\s+files?\s+changed/);
-    if (filesMatch) changedFiles = parseInt(filesMatch[1].replace(/,/g, ""), 10);
-  }
-
-  // ── Parse timestamps ──
-  const timeEl = doc.querySelector("relative-time");
-  const createdAt = timeEl?.getAttribute("datetime") || new Date().toISOString();
-
-  // ── Parse draft status ──
-  const isDraft = !!doc.querySelector('[title="Status: Draft"]')
-    || bodyText.includes("Draft pull request")
-    || !!doc.querySelector(".gh-header-meta .State--draft");
-
-  // ── Parse merge state from the merge box ──
-  let mergeableState = "unknown";
-  const mergeArea = doc.querySelector('.merge-message, .merging-body, [data-merge-box]');
-  if (mergeArea) {
-    const text = mergeArea.textContent?.toLowerCase() || "";
-    if (text.includes("conflict")) mergeableState = "dirty";
-    else if (text.includes("blocked")) mergeableState = "blocked";
-    else if (text.includes("can be merged") || text.includes("squash and merge") || text.includes("able to merge")) mergeableState = "clean";
-  }
-
-  // ── Parse reviews from the sidebar ──
-  const reviews: ReviewInfo[] = [];
-  doc.querySelectorAll('.sidebar-assignee .reviewers-status-icon, .review-status-item, [data-hovercard-type="user"]').forEach((el) => {
-    const svgClasses = el.querySelector("svg")?.classList?.toString() || el.className?.toString?.() || "";
-    const parentEl = el.closest("li, .review-status-item, .sidebar-assignee");
-    const user = parentEl?.querySelector("a.assignee, a[data-hovercard-type='user']")?.textContent?.trim() || "reviewer";
-    let state: ReviewInfo["state"] = "COMMENTED";
-    if (svgClasses.includes("color-fg-done") || svgClasses.includes("color-fg-success")) state = "APPROVED";
-    else if (svgClasses.includes("color-fg-attention") || svgClasses.includes("color-fg-danger")) state = "CHANGES_REQUESTED";
-    if (user !== "reviewer") {
-      reviews.push({ user, state, submitted_at: createdAt });
-    }
-  });
-
-  // ── Parse requested reviewers ──
-  const requestedReviewers: string[] = [];
-
-  // ── Parse CI status from merge box ──
-  const checkRuns: CheckRunInfo[] = [];
-  doc.querySelectorAll('.merge-status-item, .branch-action-item').forEach((el) => {
-    const text = el.textContent?.trim() || "";
-    const name = text.substring(0, 60);
-    const svgClasses = el.querySelector("svg")?.classList?.toString() || "";
-    let status: CheckRunInfo["status"] = "completed";
-    let conclusion: CheckRunInfo["conclusion"] = null;
-    if (svgClasses.includes("color-fg-success") || svgClasses.includes("octicon-check")) conclusion = "success";
-    else if (svgClasses.includes("color-fg-danger") || svgClasses.includes("octicon-x")) conclusion = "failure";
-    else if (svgClasses.includes("color-fg-attention") || svgClasses.includes("octicon-dot-fill")) { status = "in_progress"; }
-    checkRuns.push({ name, status, conclusion });
-  });
-
-  // ── Parse labels ──
-  const labels: Array<{ name: string; color: string }> = [];
-  doc.querySelectorAll('.IssueLabel, .js-issue-labels .label').forEach((el) => {
-    labels.push({
-      name: el.textContent?.trim() || "",
-      color: (el as HTMLElement).style.backgroundColor || "#ededed",
-    });
-  });
-
-  // ── Parse review comment count from the tab ──
-  let reviewComments = 0;
-  const tabCounter = doc.querySelector('#conversation_tab_counter');
-  if (tabCounter) {
-    const n = parseInt(tabCounter.textContent?.trim() || "0", 10);
-    if (!isNaN(n)) reviewComments = n;
-  }
-
-  const pr: PullRequestDetails = {
-    number: prNumber,
-    title: doc.querySelector(".gh-header-title .js-issue-title")?.textContent?.trim() || `PR #${prNumber}`,
-    additions,
-    deletions,
-    changed_files: changedFiles,
-    created_at: createdAt,
-    updated_at: createdAt,
-    merged_at: null,
-    draft: isDraft,
-    mergeable_state: mergeableState,
-    labels,
-    head_sha: "",
-    head_ref: doc.querySelector(".head-ref")?.textContent?.trim() || "",
-    base_ref: doc.querySelector(".base-ref")?.textContent?.trim() || "",
-    user_login: doc.querySelector(".gh-header-meta .author")?.textContent?.trim() || "",
-    requested_reviewers: requestedReviewers,
-    review_comments: reviewComments,
-  };
-
-  const ci = summarizeCI(null, checkRuns);
-
-  return { pr, reviews, ci, comparison: null };
 }
 
 // ── URL parsing ──
@@ -323,8 +208,8 @@ function colorExistingTimestamp(row: Element, createdAt: string): void {
 function injectPRInfo(row: Element, data: EnhancedPRData): void {
   if (row.querySelector(".ghpr-enhancements")) return;
 
-  const { pr, reviews, ci, comparison } = data;
-  const reviewSummary = summarizeReviews(reviews);
+  const { pr, ci, comparison } = data;
+  const reviewSummary = readReviewsFromRow(row);
 
   // ── Single row of badges ──
   const badgeRow = document.createElement("div");
@@ -385,6 +270,28 @@ function buildReviewTitle(summary: ReviewSummary): string {
   if (summary.changesRequested.length > 0) parts.push(`Changes requested by: ${summary.changesRequested.join(", ")}`);
   if (summary.commented.length > 0) parts.push(`Comments from: ${summary.commented.join(", ")}`);
   return parts.length > 0 ? parts.join("\n") : "No reviews yet";
+}
+
+// ── Read review status from the list page row (already rendered by GitHub) ──
+
+function readReviewsFromRow(row: Element): ReviewSummary {
+  const reviewLink = row.querySelector('a[href*="#partial-pull-merging"]');
+  if (!reviewLink) return { approved: [], changesRequested: [], commented: [], overall: "none" };
+
+  const text = reviewLink.textContent?.trim()?.toLowerCase() || "";
+  const ariaLabel = reviewLink.getAttribute("aria-label") || "";
+
+  if (text.includes("approved")) {
+    return { approved: [ariaLabel || "reviewer"], changesRequested: [], commented: [], overall: "approved" };
+  }
+  if (text.includes("changes requested")) {
+    return { approved: [], changesRequested: [ariaLabel || "reviewer"], commented: [], overall: "changes_requested" };
+  }
+  if (text.includes("review required")) {
+    return { approved: [], changesRequested: [], commented: [], overall: "pending" };
+  }
+
+  return { approved: [], changesRequested: [], commented: [], overall: "none" };
 }
 
 // ── Read CI status from the list page row (already rendered by GitHub) ──
@@ -457,14 +364,8 @@ async function enhancePRList(): Promise<void> {
       }
 
       try {
-        const data = await fetchPRFromPage(owner, repo, prNumber);
+        const data = await fetchPRData(owner, repo, prNumber, row);
         if (data) {
-          // Override CI with info from the list page (already rendered, more reliable)
-          data.ci = readCIFromRow(row);
-          // Supplement draft status from list page
-          if (!data.pr.draft && isDraftFromRow(row)) {
-            data.pr.draft = true;
-          }
           injectPRInfo(row, data);
         } else {
           console.debug("[GHPR] No data for PR #" + prNumber);
