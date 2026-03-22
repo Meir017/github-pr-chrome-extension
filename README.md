@@ -2,6 +2,8 @@
 
 A Chrome extension that enhances GitHub's Pull Request list pages with useful at-a-glance information.
 
+![PR list with enhancement badges](images/pr-list.png)
+
 ## Features
 
 | Badge | Description |
@@ -77,9 +79,11 @@ popup.html             # Popup UI
 
 1. The **content script** runs on `github.com/*/pulls` pages
 2. It detects PR rows in the DOM and extracts PR numbers
-3. Sends messages to the **background service worker** to call the GitHub API
-4. The API responses are used to inject size badges, diff stats, and age indicators into each PR row
-5. A `MutationObserver` handles dynamic page updates (GitHub uses Turbo navigation)
+3. For each PR, it fetches `/{owner}/{repo}/pull/{n}/files` as JSON (same-origin, using session cookies — no token required)
+4. The JSON response contains accurate `diffSummaries` with per-file line counts, plus PR metadata
+5. CI status, review state, and draft status are read directly from the existing list page DOM
+6. Badges are injected into each PR row
+7. A `MutationObserver` handles dynamic page updates (GitHub uses Turbo navigation)
 
 ## License
 
